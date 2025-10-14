@@ -17,7 +17,7 @@ class ClickHouseConfig(BaseSettings):
     """ClickHouse数据库配置"""
 
     host: str = Field(default="localhost", description="ClickHouse服务器地址")
-    port: int = Field(default=9000, description="ClickHouse服务器端口")
+    port: int = Field(default=8123, description="ClickHouse HTTP端口（8123=HTTP, 9000=TCP）")
     database: str = Field(default="a_share", description="数据库名称")
     user: str = Field(default="default", description="用户名")
     password: str = Field(default="", description="密码")

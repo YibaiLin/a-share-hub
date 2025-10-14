@@ -21,10 +21,16 @@ from core.logger import logger
 class ClickHouseClient:
     """ClickHouse客户端类"""
 
-    def __init__(self):
-        """初始化ClickHouse客户端"""
+    def __init__(self, database: Optional[str] = None):
+        """
+        初始化ClickHouse客户端
+
+        Args:
+            database: 数据库名称，如果为None则使用配置中的database
+        """
         self.client: Optional[Client] = None
         self._config = settings.clickhouse
+        self._database = database if database is not None else self._config.database
 
     def connect(self) -> None:
         """
@@ -37,12 +43,12 @@ class ClickHouseClient:
             self.client = clickhouse_connect.get_client(
                 host=self._config.host,
                 port=self._config.port,
-                database=self._config.database,
+                database=self._database,
                 username=self._config.user,
                 password=self._config.password,
             )
             logger.info(
-                f"ClickHouse连接成功: {self._config.host}:{self._config.port}/{self._config.database}"
+                f"ClickHouse连接成功: {self._config.host}:{self._config.port}/{self._database}"
             )
         except Exception as e:
             logger.error(f"ClickHouse连接失败: {e}")
