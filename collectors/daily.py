@@ -6,7 +6,7 @@
 
 import akshare as ak
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 from typing import Any, Optional
 from collectors.base import BaseCollector
 from utils.data_transform import (
@@ -218,8 +218,8 @@ class DailyCollector(BaseCollector):
                 logger.warning(f"日期解析失败: {date_str}, {e}")
                 return ""
 
-        # 如果是datetime类型
-        if isinstance(date_str, (datetime, pd.Timestamp)):
+        # 如果是datetime/date/Timestamp类型
+        if isinstance(date_str, (datetime, date, pd.Timestamp)):
             return format_date(date_str)
 
         return ""

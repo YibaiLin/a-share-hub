@@ -5,11 +5,11 @@ ClickHouse存储处理器
 """
 
 from typing import Optional, Any
-from datetime import datetime
+from datetime import datetime, date
 import pandas as pd
 from core.database import ClickHouseClient, get_db_client
 from core.logger import logger
-from utils.date_helper import format_date
+from utils.date_helper import format_date, parse_date
 from config.settings import settings
 
 
@@ -61,9 +61,18 @@ class ClickHouseHandler:
             # 准备插入数据
             insert_data = []
             for record in data:
+                # 将trade_date字符串转换为date对象
+                trade_date_str = record["trade_date"]
+                if isinstance(trade_date_str, str):
+                    trade_date = parse_date(trade_date_str)
+                elif isinstance(trade_date_str, date):
+                    trade_date = trade_date_str
+                else:
+                    raise ValueError(f"Invalid trade_date type: {type(trade_date_str)}")
+
                 row = [
                     ts_code,
-                    record["trade_date"],
+                    trade_date,  # 使用date对象
                     record["open"],
                     record["high"],
                     record["low"],
@@ -323,26 +332,52 @@ class ClickHouseHandler:
         try:
             # 获取待插入数据的日期范围
             dates = [record["trade_date"] for record in data]
-            min_date = min(dates)
-            max_date = max(dates)
+
+            # 处理日期：如果是字符串则转换为date对象
+            date_objects = []
+            for d in dates:
+                if isinstance(d, str):
+                    date_objects.append(parse_date(d))
+                elif isinstance(d, date):
+                    date_objects.append(d)
+                else:
+                    logger.warning(f"Invalid date type: {type(d)}, value: {d}")
+                    continue
+
+            if not date_objects:
+                return data
+
+            min_date = min(date_objects)
+            max_date = max(date_objects)
 
             # 查询已存在的日期
             sql = f"""
                 SELECT DISTINCT trade_date
                 FROM stock_daily
                 WHERE ts_code = '{ts_code}'
-                  AND trade_date >= '{min_date}'
-                  AND trade_date <= '{max_date}'
+                  AND trade_date >= toDate('{min_date}')
+                  AND trade_date <= toDate('{max_date}')
             """
 
             result = self.client.execute(sql)
+            # 将查询结果转换为字符串格式，用于比较
             existing_dates = {format_date(row[0]) for row in result.result_rows}
 
-            # 过滤已存在的数据
-            new_data = [
-                record for record in data
-                if record["trade_date"] not in existing_dates
-            ]
+            # 过滤已存在的数据（统一转换为字符串比较）
+            new_data = []
+            for record in data:
+                trade_date = record["trade_date"]
+                # 转换为字符串格式进行比较
+                if isinstance(trade_date, str):
+                    date_str = trade_date
+                elif isinstance(trade_date, date):
+                    date_str = format_date(trade_date)
+                else:
+                    logger.warning(f"Skipping invalid date: {trade_date}")
+                    continue
+
+                if date_str not in existing_dates:
+                    new_data.append(record)
 
             if len(new_data) < len(data):
                 logger.info(
