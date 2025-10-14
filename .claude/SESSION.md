@@ -4,38 +4,43 @@
 
 ## 当前状态
 
-- **当前Phase**: Phase 3 - 核心模块
+- **当前Phase**: Phase 4 - 数据库初始化
 - **当前任务**: 已完成
-- **进度**: 33% (3/9 Phase完成)
-- **分支**: phase-3-core
-- **最后更新**: 2025-10-15 00:15
+- **进度**: 44% (4/9 Phase完成)
+- **分支**: main
+- **最后更新**: 2025-10-15 00:25
 
 ---
 
 ## 上次会话总结
 
 ### 完成的工作
-- ✅ 完成Phase 3核心模块（100%）
-- ✅ 实现core/logger.py日志系统
-  - 控制台和文件双输出
-  - 日志文件按日期轮转
-  - 异步写入提升性能
-- ✅ 实现core/database.py ClickHouse连接池
-  - 同步连接管理
-  - 支持查询、插入、DataFrame操作
-  - 3次重试机制
-- ✅ 实现core/cache.py Redis连接池
-  - 异步连接管理
-  - 支持KV和哈希表操作
-  - 连接池配置
-- ✅ 添加完整单元测试（27个测试全部通过）
+- ✅ 完成Phase 4数据库初始化（100%）
+- ✅ 创建scripts/init_db.py数据库初始化脚本
+  - 命令行参数解析（--reset）
+  - 表存在性检查
+  - 幂等性支持（可重复执行）
+- ✅ 定义3张ClickHouse表结构
+  - stock_basic: 股票基础信息（无分区）
+  - stock_daily: 日线数据（按月分区）
+  - stock_minute: 分钟线数据（按日分区）
+- ✅ 修复ClickHouse连接配置
+  - HTTP端口9000→8123
+  - core/database.py支持指定database参数
+- ✅ 完整测试验证
+  - 首次执行成功创建
+  - 幂等性验证通过
+  - --reset重置功能正常
 
 ### 遇到的问题
-- 日志测试失败 → loguru异步写入需要延迟，添加time.sleep(0.5)解决
-- 所有测试通过
+1. ClickHouse连接端口错误 → clickhouse-connect使用HTTP协议需8123端口
+2. 连接时database不存在 → 先连接default库创建database，再连接目标库创建表
+3. Windows终端emoji显示错误 → GBK编码问题，不影响功能
 
 ### Git提交
-- 586218d - feat: 实现核心模块(日志、数据库、缓存连接)
+- 59a38a1 - feat: 实现数据库初始化脚本
+- 已合并到main
+- 已打标签v0.4.0
 
 ---
 
@@ -46,24 +51,26 @@
 - [x] Phase 1: 项目初始化 ✅
 - [x] Phase 2: 配置管理模块 ✅
 - [x] Phase 3: 核心模块 ✅
+- [x] Phase 4: 数据库初始化 ✅
 
-- [ ] Phase 4: 数据库初始化
-  - [ ] 4.1 创建数据库初始化脚本
-  - [ ] 4.2 定义ClickHouse表结构
-  - [ ] 4.3 实现表创建逻辑
-  - [ ] 4.4 验证和测试
+- [ ] Phase 5: 基础采集器框架
+  - [ ] 5.1 实现基础采集器类（BaseCollector）
+  - [ ] 5.2 实现数据转换工具（price_to_int等）
+  - [ ] 5.3 实现日期工具（trading_day判断）
+  - [ ] 5.4 添加单元测试
 
 ### 注意事项
-- Phase 4需要创建新分支 phase-4-database
-- 需要先合并phase-3-core到main并打标签v0.3.0
-- 定义stock_basic、stock_daily、stock_minute三张表
-- 配置正确的分区策略（日线按月，分钟线按日）
-- 实现幂等性（可重复执行）
+- Phase 5需要创建新分支 phase-5-collector
+- 需要推送Phase 4到GitHub（main + tag v0.4.0）
+- BaseCollector是抽象基类，使用abc模块
+- 限流机制使用asyncio.sleep
+- 重试机制使用tenacity库
+- 价格数据×100转整型存储
 
 ### 可能的问题
-- ClickHouse表结构设计要符合CLAUDE.md规范
-- 分区键和排序键的正确配置
-- 确保脚本的幂等性
+- 抽象基类的正确定义
+- 限流机制的测试方法
+- 价格转换的边界情况（None, 0, 负数）
 
 ---
 
@@ -72,55 +79,55 @@
 ### 开发环境
 - **操作系统**: Windows 10 + WSL2 (Ubuntu 22.04)
 - **Python**: 3.11.13 (Miniconda, alpha环境)
-- **ClickHouse**: localhost:9000 (WSL2)
+- **ClickHouse**: localhost:8123 (HTTP接口)
 - **Redis**: localhost:6379 (WSL2)
 
 ### 项目信息
 - **项目名称**: A-Share Hub
 - **仓库地址**: https://github.com/YibaiLin/a-share-hub
-- **本地路径**: [待创建]
+- **本地路径**: F:\project-alpha\a-share-hub
 
 ### 依赖服务状态
 - ✅ ClickHouse: 已安装并运行
 - ✅ Redis: 已安装并运行
 - ✅ Python环境: 已配置
-- ⏸️ GitHub仓库: 待创建
+- ✅ GitHub仓库: 已创建并同步
 
 ---
 
 ## 快速命令
 
-### Phase 0 快速参考
-```bash
-# 创建项目目录
-mkdir a-share-hub && cd a-share-hub
-
-# 初始化Git
-git init
-git config user.name "Your Name"
-git config user.email "your@email.com"
-
-# 创建文档目录
-mkdir -p .claude prompts/{init,features,testing,maintenance}
-
-# 复制文档后提交
-git add .claude/
-git commit -m "docs: 初始化项目文档"
-git tag v0.0.0 -m "项目启动"
-
-# 创建GitHub仓库后关联
-git remote add origin https://github.com/YibaiLin/a-share-hub.git
-git push -u origin main
-git push origin --tags
-```
-
-### Phase 1 启动命令
+### Phase 5 启动命令
 ```bash
 # 创建分支
-git checkout -b phase-1-init
+git checkout -b phase-5-collector
 
 # 启动Claude Code会话
-"继续Phase 1开发，请先读取SESSION.md"
+"继续Phase 5开发，请先读取SESSION.md"
+```
+
+### 测试命令
+```bash
+# 运行所有测试
+pytest tests/ -v
+
+# 运行特定模块测试
+pytest tests/test_collectors/ -v
+
+# 查看覆盖率
+pytest tests/ --cov=collectors --cov=utils
+```
+
+### 数据库操作
+```bash
+# 初始化数据库
+python scripts/init_db.py
+
+# 重置数据库
+python scripts/init_db.py --reset
+
+# 验证表结构
+python -c "from core.database import ClickHouseClient; client = ClickHouseClient(); client.connect(); result = client.execute('SHOW TABLES'); print(result.result_rows); client.close()"
 ```
 
 ---
@@ -128,14 +135,17 @@ git checkout -b phase-1-init
 ## 开发节奏
 
 ### 已完成
-- ✅ 2025-10-12 上午：项目规划和文档设计
-- ✅ 2025-10-12 下午：完成所有核心文档创建
+- ✅ 2025-10-12: 项目规划和文档设计
+- ✅ 2025-10-14: Phase 1 项目初始化
+- ✅ 2025-10-14: Phase 2 配置管理模块
+- ✅ 2025-10-15: Phase 3 核心模块（日志、数据库、缓存）
+- ✅ 2025-10-15: Phase 4 数据库初始化
 
 ### 计划中
-- ⏸️ 2025-10-12 下午：Phase 0 手动准备（预计5分钟）
-- ⏸️ 2025-10-12 下午：Phase 1-2 基础框架（预计25分钟）
-- ⏸️ 2025-10-13：Phase 3-5 核心功能（预计1小时）
-- ⏸️ 2025-10-13：Phase 6-8 完整系统（预计1.5小时）
+- ⏸️ 待定: Phase 5 基础采集器框架（预计25分钟）
+- ⏸️ 待定: Phase 6 日线采集器+存储（预计30分钟）
+- ⏸️ 待定: Phase 7 API接口（预计30分钟）
+- ⏸️ 待定: Phase 8 任务调度系统（预计25分钟）
 
 ---
 
@@ -195,8 +205,11 @@ git checkout -b phase-1-init
 ## 更新历史
 
 - 2025-10-12 14:00: 创建初始版本
-- [待后续会话更新...]
+- 2025-10-14 01:00: Phase 1完成
+- 2025-10-14 23:30: Phase 2完成
+- 2025-10-15 00:15: Phase 3完成
+- 2025-10-15 00:25: Phase 4完成
 
 ---
 
-**下一步**: 开始Phase 0手动准备工作 → 参考WORKFLOW.md
+**下一步**: Phase 5 - 基础采集器框架

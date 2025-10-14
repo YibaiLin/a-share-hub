@@ -459,3 +459,88 @@ grep "标签: v" .claude/DEVLOG.md
 ---
 
 **最后更新**: 2025-10-15 00:16
+
+---
+
+## 📅 2025-10-15
+
+### 00:25 - Phase 4: 数据库初始化
+
+**完成内容**：
+- 创建scripts/init_db.py数据库初始化脚本（295行）
+  - 命令行参数解析（argparse，支持--reset）
+  - 数据库和表的存在性检查
+  - 幂等性支持（可重复执行）
+  - 详细的日志输出和错误处理
+
+- 定义3张ClickHouse表结构：
+  - stock_basic: 股票基础信息表（ReplacingMergeTree，无分区）
+  - stock_daily: 日线数据表（ReplacingMergeTree，按月分区toYYYYMM）
+  - stock_minute: 分钟线数据表（ReplacingMergeTree，按日分区toYYYYMMDD）
+
+- 修复ClickHouse连接配置：
+  - 发现端口9000→8123问题（clickhouse-connect使用HTTP协议）
+  - 更新config/settings.py默认端口为8123
+  - 更新.env.example和.env配置注释
+
+- 增强core/database.py：
+  - 添加database参数支持（用于连接default库创建新数据库）
+  - 修改init_db.py：先连接default库创建数据库，再连接目标库创建表
+
+- 完整测试验证：
+  - 首次执行：成功创建数据库和3张表
+  - 幂等性：重复执行正确跳过已存在的表
+  - --reset：成功删除并重建所有表
+  - 表结构验证：字段、类型、分区策略全部正确
+
+**Git提交**：
+- 59a38a1 - feat: 实现数据库初始化脚本
+- 已合并到main
+- 已打标签v0.4.0
+
+**遇到的问题**：
+1. ClickHouse连接端口错误（9000）
+   - 原因：clickhouse-connect库使用HTTP协议，需要8123端口
+   - 解决：修改默认配置为8123，添加注释说明
+
+2. 连接时database不存在错误
+   - 原因：直接连接a_share数据库，但数据库还未创建
+   - 解决：两步走策略
+     - 步骤1：连接default库，执行CREATE DATABASE
+     - 步骤2：连接a_share库，执行CREATE TABLE
+
+3. Windows终端emoji显示乱码
+   - 原因：Windows终端使用GBK编码，无法显示emoji
+   - 影响：仅显示问题，不影响功能
+   - 解决：无需修复，日志文件正常
+
+**测试结果**：
+- 初始化脚本执行成功（2秒）
+- 所有表创建成功
+- 分区策略验证正确
+- 幂等性测试通过
+- --reset功能正常
+
+**技术亮点**：
+- 使用两步连接策略解决"鸡生蛋"问题
+- 完善的幂等性设计
+- 清晰的日志输出
+- 支持表结构自动验证
+
+**进度**：Phase 4: 4/4完成 (100%) ✅
+
+**整体进度**：4/9 Phase完成 (44%)
+
+**下次继续**：
+- 推送Phase 4到GitHub（main + tag v0.4.0）
+- 开始Phase 5 - 基础采集器框架
+  - 实现BaseCollector抽象基类
+  - 实现限流和重试机制
+  - 实现数据转换工具
+  - 实现日期工具
+
+**标签**: v0.4.0 ✅（待推送）
+
+---
+
+**最后更新**: 2025-10-15 00:28
