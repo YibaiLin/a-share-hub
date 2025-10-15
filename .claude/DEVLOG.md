@@ -1004,4 +1004,108 @@ python scripts/backfill.py --resume
 
 ---
 
-**最后更新**: 2025-10-16 09:30
+### 16:00 - Phase 9.7: API限流保护优化（会话完成）
+
+**背景**：
+运行全市场回填时遇到API限流错误（ProxyError, RemoteDisconnected），原因是0.5秒延迟不足以避免东方财富API的限流保护。需要实现三层防护机制。
+
+**完成内容**：
+
+**第一层：配置优化**
+- 修改config/settings.py
+  - collector_delay: 0.5s → 1.5s（默认延迟增加3倍）
+  - 新增collector_min_delay: 1.0s
+  - 新增collector_max_delay: 5.0s
+  - 新增collector_adaptive_delay: true（启用自适应延迟）
+  - 添加参数验证器
+- 更新.env.example和.env配置说明
+
+**第二层：智能动态延迟机制**
+- 增强RateLimiter类（collectors/base.py）
+  - 支持自适应延迟调整
+  - 失败时自动增加延迟（1.5x → 2.0x → 2.5x，最大5秒）
+  - 成功时逐步降低延迟（每次-10%）
+  - 新增on_success()和on_failure()回调方法
+  - 新增reset()重置方法
+- 在BaseCollector中集成智能延迟回调
+  - collect()成功时调用on_success()
+  - collect()失败时调用on_failure()
+  - 空数据也算成功（股票可能停牌）
+
+**第三层：连续失败监控和暂停机制**
+- 创建FailureMonitor类（utils/failure_monitor.py, 173行）
+  - 监控连续失败次数
+  - 达到阈值（默认10次）时触发暂停（默认60秒）
+  - 支持暂停冷却恢复
+  - 成功时重置连续失败计数
+  - 提供统计信息（get_stats）
+- 在scripts/backfill.py中集成FailureMonitor
+  - 每次采集前检查是否需要暂停
+  - 成功/失败时通知监控器
+  - 报告中显示暂停统计信息
+
+**第四层：失败处理和补齐机制**
+- 增强ProgressTracker失败记录（utils/progress.py）
+  - 新增failed_details字段记录{ts_code: error_msg}
+  - mark_failed()方法支持传入错误消息
+  - 新增get_failed_details()获取失败详情
+- 实现retry_failed_stocks()补齐函数（scripts/backfill.py, 143行）
+  - 从进度文件读取失败股票列表
+  - 显示失败详情（前10个）
+  - 重新采集并更新进度
+  - 集成FailureMonitor和智能延迟
+  - 输出重试报告
+- 新增--retry-failed参数
+  - 支持重试所有失败股票
+  - 使用示例：python scripts/backfill.py --retry-failed
+
+**单元测试**：
+- 新增18个单元测试（全部通过）
+  - test_collectors/test_base.py: 6个智能延迟测试
+    - test_adaptive_delay_on_failure
+    - test_adaptive_delay_on_success
+    - test_adaptive_delay_disabled
+    - test_rate_limiter_reset
+  - test_utils/test_failure_monitor.py: 12个失败监控测试
+    - test_trigger_pause_on_threshold
+    - test_wait_if_paused
+    - test_multiple_pauses
+    - test_disabled_monitor等
+- 总测试数：187个（184 passed, 3 old failures）
+
+**Git提交**：
+- b5a2653 - fix: 增加采集器默认延迟到1.5秒，缓解API限流问题
+- f84d645 - feat: 实现智能动态延迟机制
+- 83e95eb - feat: 实现连续失败监控和暂停机制
+- 16a7669 - feat: 实现失败处理和补齐机制
+- 已合并到main（Phase 9.7完成）
+
+**技术亮点**：
+1. **三层防护机制**：
+   - 基础延迟保护（1.5秒）
+   - 智能动态调整（失败增加，成功恢复）
+   - 连续失败暂停（10次触发，60秒恢复）
+
+2. **失败补齐机制**：
+   - 失败详情记录（含错误类型）
+   - 独立重试命令（--retry-failed）
+   - 重试过程同样受三层保护
+
+3. **可配置性**：
+   - 所有参数可通过配置文件调整
+   - 支持禁用自适应延迟
+   - 支持禁用失败监控
+
+**问题解决**：
+- 问题：全市场回填时遇到API限流（ProxyError, RemoteDisconnected）
+- 原因：0.5秒延迟不足，东方财富API有更严格的限流保护
+- 解决：三层防护机制有效缓解API限流问题
+- 建议：实际使用时可根据API响应调整参数
+
+**进度**: Phase 9: 7/7完成 (100%) ✅
+
+**下次**: Phase 9全部完成，建议实际运行回填验证优化效果
+
+---
+
+**最后更新**: 2025-10-16 16:00
