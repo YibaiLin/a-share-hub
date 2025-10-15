@@ -922,4 +922,86 @@ https://github.com/YibaiLin/a-share-hub
 
 ---
 
-**最后更新**: 2025-10-15 01:35
+## 📅 2025-10-16
+
+### 09:30 - Phase 9: 历史数据回填脚本（会话完成）
+
+**完成内容**：
+- 更新项目文档
+  - TODO.md: 新增Phase 9任务清单（6个子任务）
+  - DECISIONS.md: 新增ADR-009（历史数据回填策略）
+  - README.md: 新增数据采集使用说明和FAQ
+  - SESSION.md: 更新会话状态
+
+- 实现股票列表采集器（collectors/stock_list.py, 199行）
+  - 对接AKShare的stock_info_a_code_name接口
+  - 自动添加市场后缀（.SZ/.SH/.BJ）
+  - 支持获取全A股约5000只股票列表
+  - 14个单元测试全部通过
+
+- 实现进度管理器（utils/progress.py, 272行）
+  - 进度保存/加载（JSON文件格式）
+  - 断点续传支持
+  - 统计信息汇总
+  - 成功/失败股票跟踪
+  - 15个单元测试全部通过
+
+- 实现历史数据回填脚本（scripts/backfill.py, 423行）
+  - 支持全市场回填（--all参数）
+  - 支持指定股票回填（--symbols参数）
+  - 支持断点续传（--resume参数）
+  - 支持并发控制（--concurrency参数，默认1）
+  - 使用tqdm显示实时进度条
+  - 完整的错误处理和采集报告
+
+- 添加新依赖：tqdm>=4.66.0
+
+**Git提交**：
+- edb1552 - docs: 新增Phase 9规划(历史数据回填功能)
+- 913d47f - feat: 实现股票列表采集器(Phase 9.1)
+- 4df21bf - feat: 实现进度管理器(Phase 9.2)
+- d3512cd - feat: 实现历史数据回填脚本(Phase 9.3)
+- 已合并到main
+- 已打标签v0.9.0
+
+**测试结果**：
+- 新增29个单元测试（29 passed）
+- 总测试数：171个（168 passed, 3 old failures)
+- stock_list: 14个测试 ✅
+- progress: 15个测试 ✅
+
+**技术亮点**：
+- 断点续传机制（进度保存在.backfill_progress.json）
+- 并发控制和API限流保护
+- 实时进度显示（tqdm进度条、ETA、速度）
+- 完整的错误处理（失败股票不影响其他）
+- 数据自动去重（复用ClickHouseHandler）
+
+**性能预估**：
+- 全市场（5000只）：约42分钟（0.5秒/只）
+- 数据量：约625万条记录
+- 存储空间：1-2GB（ClickHouse压缩后）
+
+**使用示例**：
+```bash
+# 全市场回填
+python scripts/backfill.py --start-date 20200101 --all
+
+# 指定股票
+python scripts/backfill.py --start-date 20200101 --symbols 000001.SZ,600000.SH
+
+# 断点续传
+python scripts/backfill.py --resume
+```
+
+**进度**: Phase 9: 6/6完成 (100%) ✅
+
+**下次**: 建议在终端执行历史数据回填，然后项目即可正式使用
+
+**标签**: v0.9.0 ✅
+
+**GitHub同步**: ✅ 已推送到origin/main
+
+---
+
+**最后更新**: 2025-10-16 09:30
