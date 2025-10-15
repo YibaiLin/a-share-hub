@@ -97,7 +97,10 @@ class Settings(BaseSettings):
     api_port: int = Field(default=8000, description="API服务端口")
 
     # 采集器配置
-    collector_delay: float = Field(default=0.5, description="采集延迟（秒）")
+    collector_delay: float = Field(default=1.5, description="采集延迟（秒），建议1.5-2.0秒以避免API限流")
+    collector_min_delay: float = Field(default=1.0, description="智能延迟最小值（秒）")
+    collector_max_delay: float = Field(default=5.0, description="智能延迟最大值（秒）")
+    collector_adaptive_delay: bool = Field(default=True, description="启用自适应延迟调整")
     collector_retry_times: int = Field(default=3, description="重试次数")
     collector_batch_size: int = Field(default=1000, description="批量插入大小")
 
@@ -125,6 +128,22 @@ class Settings(BaseSettings):
         """验证采集延迟"""
         if v < 0:
             raise ValueError(f"采集延迟不能为负数，当前值: {v}")
+        return v
+
+    @field_validator("collector_min_delay")
+    @classmethod
+    def validate_collector_min_delay(cls, v: float) -> float:
+        """验证最小延迟"""
+        if v < 0:
+            raise ValueError(f"最小延迟不能为负数，当前值: {v}")
+        return v
+
+    @field_validator("collector_max_delay")
+    @classmethod
+    def validate_collector_max_delay(cls, v: float) -> float:
+        """验证最大延迟"""
+        if v < 0:
+            raise ValueError(f"最大延迟不能为负数，当前值: {v}")
         return v
 
     @field_validator("collector_retry_times")
