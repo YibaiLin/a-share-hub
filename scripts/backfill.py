@@ -22,6 +22,7 @@ from collectors.daily import DailyCollector
 from storage.clickhouse_handler import ClickHouseHandler
 from utils.progress import ProgressTracker
 from utils.date_helper import format_date
+from utils.failure_monitor import FailureMonitor
 
 
 async def backfill_all_stocks(
@@ -82,6 +83,14 @@ async def backfill_all_stocks(
         client = get_db_client()
         handler = ClickHouseHandler(client)
 
+        # 初始化失败监控器
+        failure_monitor = FailureMonitor(
+            threshold=10,  # 连续失败10次触发暂停
+            pause_duration=60,  # 暂停60秒
+            enable=True
+        )
+        logger.info(f"失败监控: 阈值={failure_monitor.threshold}, 暂停时长={failure_monitor.pause_duration}秒")
+
         # 创建信号量控制并发
         semaphore = asyncio.Semaphore(concurrency)
 
@@ -98,6 +107,9 @@ async def backfill_all_stocks(
         ) as pbar:
             for ts_code in stocks_to_collect:
                 async with semaphore:
+                    # 检查是否需要暂停
+                    failure_monitor.wait_if_paused()
+
                     try:
                         # 更新进度条描述
                         pbar.set_postfix_str(f"当前: {ts_code}")
@@ -112,6 +124,8 @@ async def backfill_all_stocks(
                         if not data:
                             logger.debug(f"{ts_code} 无数据")
                             tracker.mark_success(ts_code, 0)
+                            # 无数据算成功（可能停牌）
+                            failure_monitor.on_success()
                             pbar.update(1)
                             continue
 
@@ -125,13 +139,18 @@ async def backfill_all_stocks(
                         # 标记成功
                         tracker.mark_success(ts_code, inserted)
                         success_count += 1
+                        # 通知监控器采集成功
+                        failure_monitor.on_success()
 
                         logger.debug(f"✓ {ts_code}: {inserted} 条记录")
 
                     except Exception as e:
-                        logger.error(f"✗ {ts_code} 采集失败: {e}")
+                        error_msg = str(e)
+                        logger.error(f"✗ {ts_code} 采集失败: {error_msg}")
                         tracker.mark_failed(ts_code)
                         failed_count += 1
+                        # 通知监控器采集失败
+                        failure_monitor.on_failure(error_msg)
 
                     finally:
                         pbar.update(1)
@@ -140,6 +159,11 @@ async def backfill_all_stocks(
         logger.info("=" * 80)
         logger.info("回填完成")
         logger.info("=" * 80)
+
+        # 打印监控统计
+        monitor_stats = failure_monitor.get_stats()
+        if monitor_stats["pause_count"] > 0:
+            logger.info(f"监控统计: 暂停{monitor_stats['pause_count']}次, 总失败{monitor_stats['total_failures']}次")
 
         report = _generate_report(tracker, start_time)
         _print_report(report)
