@@ -44,6 +44,83 @@ class TestRateLimiter:
         assert elapsed >= 0.2
         assert elapsed < 0.4
 
+    @pytest.mark.asyncio
+    async def test_adaptive_delay_on_failure(self):
+        """测试失败时自适应延迟增加"""
+        limiter = RateLimiter(delay=1.0, min_delay=1.0, max_delay=5.0, adaptive=True)
+
+        assert limiter.current_delay == 1.0
+        assert limiter.consecutive_failures == 0
+
+        # 第1次失败：延迟 × 1.5
+        limiter.on_failure()
+        assert limiter.current_delay == 1.5
+        assert limiter.consecutive_failures == 1
+
+        # 第2次失败：延迟 × 2.0
+        limiter.on_failure()
+        assert limiter.current_delay == 3.0  # 1.5 * 2.0
+        assert limiter.consecutive_failures == 2
+
+        # 第3次失败：延迟 × 2.5
+        limiter.on_failure()
+        assert limiter.current_delay == 5.0  # 3.0 * 2.5 = 7.5，但max_delay是5.0
+        assert limiter.consecutive_failures == 3
+
+    @pytest.mark.asyncio
+    async def test_adaptive_delay_on_success(self):
+        """测试成功时自适应延迟恢复"""
+        limiter = RateLimiter(delay=1.0, min_delay=1.0, max_delay=5.0, adaptive=True)
+
+        # 先模拟几次失败
+        limiter.on_failure()
+        limiter.on_failure()
+        assert limiter.current_delay == 3.0
+
+        # 成功后恢复
+        limiter.on_success()
+        assert limiter.current_delay == 2.7  # 3.0 * 0.9
+        assert limiter.consecutive_failures == 0
+
+        # 再次成功，继续恢复
+        limiter.on_success()
+        assert limiter.current_delay == 2.43  # 2.7 * 0.9
+
+        # 多次成功后恢复到基础延迟
+        for _ in range(10):
+            limiter.on_success()
+        assert limiter.current_delay == 1.0  # 不会低于base_delay
+
+    @pytest.mark.asyncio
+    async def test_adaptive_delay_disabled(self):
+        """测试禁用自适应延迟"""
+        limiter = RateLimiter(delay=1.0, adaptive=False)
+
+        # 失败不会改变延迟
+        limiter.on_failure()
+        assert limiter.current_delay == 1.0
+        assert limiter.consecutive_failures == 0
+
+        # 成功也不会改变延迟
+        limiter.on_success()
+        assert limiter.current_delay == 1.0
+
+    @pytest.mark.asyncio
+    async def test_rate_limiter_reset(self):
+        """测试重置延迟"""
+        limiter = RateLimiter(delay=1.0, min_delay=1.0, max_delay=5.0, adaptive=True)
+
+        # 模拟失败导致延迟增加
+        limiter.on_failure()
+        limiter.on_failure()
+        assert limiter.current_delay == 3.0
+        assert limiter.consecutive_failures == 2
+
+        # 重置
+        limiter.reset()
+        assert limiter.current_delay == 1.0
+        assert limiter.consecutive_failures == 0
+
 
 class MockCollector(BaseCollector):
     """测试用的Mock采集器"""

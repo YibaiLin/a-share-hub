@@ -18,26 +18,103 @@ from config.settings import settings
 
 
 class RateLimiter:
-    """限流器：控制请求频率"""
+    """
+    限流器：控制请求频率，支持智能动态延迟调整
 
-    def __init__(self, delay: float = 0.5):
+    特性：
+    - 基础延迟控制
+    - 自适应延迟（失败后增加延迟）
+    - 成功后恢复延迟
+    """
+
+    def __init__(
+        self,
+        delay: float = 0.5,
+        min_delay: float = 1.0,
+        max_delay: float = 5.0,
+        adaptive: bool = True
+    ):
         """
         初始化限流器
 
         Args:
-            delay: 每次请求之间的延迟（秒）
+            delay: 基础延迟（秒）
+            min_delay: 最小延迟（秒）
+            max_delay: 最大延迟（秒）
+            adaptive: 是否启用自适应延迟
         """
-        self.delay = delay
+        self.base_delay = delay
+        self.current_delay = delay
+        self.min_delay = min_delay
+        self.max_delay = max_delay
+        self.adaptive = adaptive
         self.last_call = 0.0
+        self.consecutive_failures = 0
 
     async def wait(self) -> None:
         """等待到允许下次请求的时间"""
         elapsed = time.time() - self.last_call
-        if elapsed < self.delay:
-            wait_time = self.delay - elapsed
-            logger.debug(f"限流等待: {wait_time:.2f}秒")
+        if elapsed < self.current_delay:
+            wait_time = self.current_delay - elapsed
+            logger.debug(f"限流等待: {wait_time:.2f}秒 (当前延迟: {self.current_delay:.2f}秒)")
             await asyncio.sleep(wait_time)
         self.last_call = time.time()
+
+    def on_success(self) -> None:
+        """
+        请求成功回调：重置失败计数，恢复延迟
+        """
+        if not self.adaptive:
+            return
+
+        self.consecutive_failures = 0
+
+        # 逐渐恢复到基础延迟（每次成功减少10%）
+        if self.current_delay > self.base_delay:
+            self.current_delay = max(
+                self.base_delay,
+                self.current_delay * 0.9
+            )
+            logger.debug(f"延迟恢复: {self.current_delay:.2f}秒")
+
+    def on_failure(self) -> None:
+        """
+        请求失败回调：增加延迟
+
+        策略：
+        - 第1次失败：延迟 × 1.5
+        - 第2次失败：延迟 × 2.0
+        - 第3次及以上：延迟 × 2.5（但不超过max_delay）
+        """
+        if not self.adaptive:
+            return
+
+        self.consecutive_failures += 1
+
+        # 根据连续失败次数调整增长倍数
+        if self.consecutive_failures == 1:
+            multiplier = 1.5
+        elif self.consecutive_failures == 2:
+            multiplier = 2.0
+        else:
+            multiplier = 2.5
+
+        old_delay = self.current_delay
+        self.current_delay = min(
+            self.max_delay,
+            self.current_delay * multiplier
+        )
+
+        logger.warning(
+            f"连续失败{self.consecutive_failures}次，延迟增加: "
+            f"{old_delay:.2f}s → {self.current_delay:.2f}s"
+        )
+
+    def reset(self) -> None:
+        """重置延迟到基础值"""
+        self.current_delay = self.base_delay
+        self.consecutive_failures = 0
+        logger.info(f"延迟已重置: {self.base_delay:.2f}秒")
 
 
 class BaseCollector(ABC):
@@ -49,9 +126,18 @@ class BaseCollector(ABC):
 
     def __init__(self):
         """初始化采集器"""
-        self.rate_limiter = RateLimiter(delay=settings.collector_delay)
+        self.rate_limiter = RateLimiter(
+            delay=settings.collector_delay,
+            min_delay=settings.collector_min_delay,
+            max_delay=settings.collector_max_delay,
+            adaptive=settings.collector_adaptive_delay
+        )
         self.retry_times = settings.collector_retry_times
-        logger.info(f"初始化采集器: {self.__class__.__name__}")
+        logger.info(
+            f"初始化采集器: {self.__class__.__name__} "
+            f"(延迟: {settings.collector_delay}s, "
+            f"自适应: {'开启' if settings.collector_adaptive_delay else '关闭'})"
+        )
 
     @abstractmethod
     async def fetch_data(self, **kwargs) -> Any:
@@ -131,6 +217,8 @@ class BaseCollector(ABC):
 
             if raw_data is None or (hasattr(raw_data, '__len__') and len(raw_data) == 0):
                 logger.warning(f"未获取到数据: {kwargs}")
+                # 空数据也算成功（股票可能停牌）
+                self.rate_limiter.on_success()
                 return []
 
             # 转换数据格式
@@ -141,13 +229,18 @@ class BaseCollector(ABC):
             logger.debug(f"开始验证数据")
             if not self.validate_data(data):
                 logger.error(f"数据验证失败: {kwargs}")
+                self.rate_limiter.on_failure()
                 raise ValueError("Data validation failed")
 
             logger.info(f"采集成功: 获取 {len(data)} 条数据")
+            # 采集成功，通知限流器
+            self.rate_limiter.on_success()
             return data
 
         except Exception as e:
             logger.error(f"采集失败: {e}, 参数: {kwargs}")
+            # 采集失败，通知限流器增加延迟
+            self.rate_limiter.on_failure()
             raise
 
     async def batch_collect(self, params_list: list[dict]) -> list[dict]:
