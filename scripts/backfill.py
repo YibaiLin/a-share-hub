@@ -147,7 +147,7 @@ async def backfill_all_stocks(
                     except Exception as e:
                         error_msg = str(e)
                         logger.error(f"✗ {ts_code} 采集失败: {error_msg}")
-                        tracker.mark_failed(ts_code)
+                        tracker.mark_failed(ts_code, error_msg)  # 传入错误消息
                         failed_count += 1
                         # 通知监控器采集失败
                         failure_monitor.on_failure(error_msg)
@@ -172,6 +172,151 @@ async def backfill_all_stocks(
 
     except Exception as e:
         logger.error(f"回填失败: {e}")
+        raise
+
+    finally:
+        close_db_client()
+
+
+async def retry_failed_stocks():
+    """
+    重试失败的股票
+
+    从进度文件中读取失败股票列表，重新采集
+
+    Returns:
+        采集报告字典
+    """
+    logger.info("=" * 80)
+    logger.info("重试失败股票")
+    logger.info("=" * 80)
+
+    start_time = datetime.now()
+
+    try:
+        # 加载进度
+        tracker = ProgressTracker()
+        if not tracker.has_progress():
+            logger.error("未找到进度文件，无法重试")
+            return None
+
+        failed_stocks = tracker.get_failed_stocks()
+        failed_details = tracker.get_failed_details()
+
+        if not failed_stocks:
+            logger.info("没有失败的股票需要重试")
+            return None
+
+        logger.info(f"发现 {len(failed_stocks)} 只失败股票")
+
+        # 显示失败详情（前10个）
+        for ts_code in failed_stocks[:10]:
+            error = failed_details.get(ts_code, "未知错误")
+            logger.warning(f"  - {ts_code}: {error}")
+        if len(failed_stocks) > 10:
+            logger.warning(f"  ... 还有 {len(failed_stocks) - 10} 只")
+
+        # 获取日期范围
+        start_date = tracker.progress_data.get("start_date")
+        end_date = tracker.progress_data.get("end_date")
+        logger.info(f"日期范围: {start_date} ~ {end_date}")
+
+        # 初始化采集器和存储
+        daily_collector = DailyCollector()
+        client = get_db_client()
+        handler = ClickHouseHandler(client)
+
+        # 初始化失败监控器
+        failure_monitor = FailureMonitor(
+            threshold=10,
+            pause_duration=60,
+            enable=True
+        )
+
+        success_count = 0
+        failed_count = 0
+
+        # 使用tqdm显示进度
+        with tqdm(total=len(failed_stocks), desc="重试进度", unit="只", ncols=100) as pbar:
+            for ts_code in failed_stocks:
+                # 检查是否需要暂停
+                failure_monitor.wait_if_paused()
+
+                try:
+                    pbar.set_postfix_str(f"当前: {ts_code}")
+
+                    # 采集数据
+                    data = await daily_collector.collect(
+                        symbol=ts_code,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+
+                    if not data:
+                        logger.debug(f"{ts_code} 无数据")
+                        tracker.mark_success(ts_code, 0)
+                        failure_monitor.on_success()
+                        success_count += 1
+                        pbar.update(1)
+                        continue
+
+                    # 存储数据
+                    inserted = handler.insert_daily(
+                        ts_code=ts_code,
+                        data=data,
+                        deduplicate=True
+                    )
+
+                    # 标记成功
+                    tracker.mark_success(ts_code, inserted)
+                    failure_monitor.on_success()
+                    success_count += 1
+
+                    logger.info(f"✓ {ts_code}: {inserted} 条记录")
+
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"✗ {ts_code} 重试失败: {error_msg}")
+                    tracker.mark_failed(ts_code, error_msg)
+                    failure_monitor.on_failure(error_msg)
+                    failed_count += 1
+
+                finally:
+                    pbar.update(1)
+
+        # 生成报告
+        logger.info("=" * 80)
+        logger.info("重试完成")
+        logger.info("=" * 80)
+
+        # 打印监控统计
+        monitor_stats = failure_monitor.get_stats()
+        if monitor_stats["pause_count"] > 0:
+            logger.info(f"监控统计: 暂停{monitor_stats['pause_count']}次, 总失败{monitor_stats['total_failures']}次")
+
+        report = {
+            "total_retried": len(failed_stocks),
+            "success": success_count,
+            "failed": failed_count,
+            "duration": (datetime.now() - start_time).total_seconds()
+        }
+
+        logger.info(f"重试股票数: {report['total_retried']}")
+        logger.info(f"成功: {report['success']}")
+        logger.info(f"失败: {report['failed']}")
+        logger.info(f"耗时: {report['duration']:.1f} 秒")
+
+        # 显示剩余失败股票
+        remaining_failed = tracker.get_failed_stocks()
+        if remaining_failed:
+            logger.warning(f"仍有 {len(remaining_failed)} 只失败: {', '.join(remaining_failed[:5])}")
+            if len(remaining_failed) > 5:
+                logger.warning(f"... 还有 {len(remaining_failed) - 5} 只")
+
+        return report
+
+    except Exception as e:
+        logger.error(f"重试失败: {e}")
         raise
 
     finally:
@@ -339,6 +484,9 @@ def main():
   # 断点续传
   python scripts/backfill.py --resume
 
+  # 重试失败股票
+  python scripts/backfill.py --retry-failed
+
   # 控制并发数
   python scripts/backfill.py --start-date 20200101 --all --concurrency 3
 
@@ -374,6 +522,11 @@ def main():
         help="断点续传（从上次中断处继续）"
     )
     parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="重试失败的股票"
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=1,
@@ -394,7 +547,11 @@ def main():
         logger.info("进度已清除")
         return
 
-    if args.resume:
+    if args.retry_failed:
+        # 重试失败股票模式
+        asyncio.run(retry_failed_stocks())
+
+    elif args.resume:
         # 断点续传模式
         tracker = ProgressTracker()
         if not tracker.has_progress():

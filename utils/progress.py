@@ -65,6 +65,7 @@ class ProgressTracker:
             "total_stocks": 0,
             "completed_stocks": [],
             "failed_stocks": [],
+            "failed_details": {},  # 新增：记录失败详情 {ts_code: error_msg}
             "start_time": "",
             "last_update": "",
             "statistics": {
@@ -112,6 +113,7 @@ class ProgressTracker:
             "total_stocks": total_stocks,
             "completed_stocks": [],
             "failed_stocks": [],
+            "failed_details": {},  # 记录失败详情
             "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "last_update": "",
             "statistics": {
@@ -150,21 +152,31 @@ class ProgressTracker:
         if ts_code in self.progress_data["failed_stocks"]:
             self.progress_data["failed_stocks"].remove(ts_code)
 
+        # 从失败详情中移除
+        if "failed_details" in self.progress_data:
+            self.progress_data["failed_details"].pop(ts_code, None)
+
         # 更新统计
         self.progress_data["statistics"]["success"] += 1
         self.progress_data["statistics"]["total_records"] += records_count
 
         self.save_progress()
 
-    def mark_failed(self, ts_code: str):
+    def mark_failed(self, ts_code: str, error_msg: str = ""):
         """
         标记股票采集失败
 
         Args:
             ts_code: 股票代码
+            error_msg: 错误消息
         """
         if ts_code not in self.progress_data["failed_stocks"]:
             self.progress_data["failed_stocks"].append(ts_code)
+
+        # 记录失败详情
+        if "failed_details" not in self.progress_data:
+            self.progress_data["failed_details"] = {}
+        self.progress_data["failed_details"][ts_code] = error_msg
 
         # 从完成列表中移除（如果存在）
         if ts_code in self.progress_data["completed_stocks"]:
@@ -220,6 +232,15 @@ class ProgressTracker:
             失败股票代码列表
         """
         return self.progress_data.get("failed_stocks", [])
+
+    def get_failed_details(self) -> dict[str, str]:
+        """
+        获取失败股票的详细信息
+
+        Returns:
+            失败详情字典 {ts_code: error_msg}
+        """
+        return self.progress_data.get("failed_details", {})
 
     def clear_progress(self):
         """
