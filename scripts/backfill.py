@@ -23,6 +23,7 @@ from storage.clickhouse_handler import ClickHouseHandler
 from utils.progress import ProgressTracker
 from utils.date_helper import format_date
 from utils.failure_monitor import FailureMonitor
+from utils.rate_limit_detector import RateLimitDetector, is_rate_limit_error
 
 
 async def backfill_all_stocks(
@@ -91,6 +92,10 @@ async def backfill_all_stocks(
         )
         logger.info(f"失败监控: 阈值={failure_monitor.threshold}, 暂停时长={failure_monitor.pause_duration}秒")
 
+        # 初始化智能限流探测器
+        rate_limit_detector = RateLimitDetector(enable=True)
+        logger.info("智能限流探测: 已启用")
+
         # 创建信号量控制并发
         semaphore = asyncio.Semaphore(concurrency)
 
@@ -107,8 +112,16 @@ async def backfill_all_stocks(
         ) as pbar:
             for ts_code in stocks_to_collect:
                 async with semaphore:
-                    # 检查是否需要暂停
+                    # 检查失败监控器是否需要暂停
                     failure_monitor.wait_if_paused()
+
+                    # 检查智能限流探测器是否需要暂停
+                    should_wait, wait_seconds = await rate_limit_detector.should_pause()
+                    if should_wait:
+                        # 如果是探测阶段，试探性请求
+                        if rate_limit_detector.detection_phase == "detecting":
+                            pbar.set_postfix_str(f"探测中 ({rate_limit_detector.probe_count}/15)")
+                        await asyncio.sleep(wait_seconds)
 
                     try:
                         # 更新进度条描述
@@ -120,6 +133,14 @@ async def backfill_all_stocks(
                             start_date=start_date,
                             end_date=end_date
                         )
+
+                        # 记录成功请求到限流探测器
+                        rate_limit_detector.record_success()
+
+                        # 如果在探测阶段试探成功，确认窗口
+                        if rate_limit_detector.detection_phase == "detecting":
+                            rate_limit_detector.confirm_window_detected()
+                            logger.info("继续采集...")
 
                         if not data:
                             logger.debug(f"{ts_code} 无数据")
@@ -146,11 +167,23 @@ async def backfill_all_stocks(
 
                     except Exception as e:
                         error_msg = str(e)
-                        logger.error(f"✗ {ts_code} 采集失败: {error_msg}")
-                        tracker.mark_failed(ts_code, error_msg)  # 传入错误消息
-                        failed_count += 1
-                        # 通知监控器采集失败
-                        failure_monitor.on_failure(error_msg)
+
+                        # 判断是否为限流错误
+                        if is_rate_limit_error(e):
+                            logger.warning(f"🚨 {ts_code} 触发限流: {error_msg}")
+                            # 通知限流探测器
+                            await rate_limit_detector.on_rate_limit_error()
+                            # 标记失败（后续可重试）
+                            tracker.mark_failed(ts_code, f"限流: {error_msg}")
+                            failed_count += 1
+                            # 不继续采集当前股票，等待探测完成
+                        else:
+                            # 其他错误
+                            logger.error(f"✗ {ts_code} 采集失败: {error_msg}")
+                            tracker.mark_failed(ts_code, error_msg)
+                            failed_count += 1
+                            # 通知监控器采集失败
+                            failure_monitor.on_failure(error_msg)
 
                     finally:
                         pbar.update(1)
@@ -164,6 +197,9 @@ async def backfill_all_stocks(
         monitor_stats = failure_monitor.get_stats()
         if monitor_stats["pause_count"] > 0:
             logger.info(f"监控统计: 暂停{monitor_stats['pause_count']}次, 总失败{monitor_stats['total_failures']}次")
+
+        # 打印限流探测统计
+        rate_limit_detector.print_summary()
 
         report = _generate_report(tracker, start_time)
         _print_report(report)
@@ -233,14 +269,25 @@ async def retry_failed_stocks():
             enable=True
         )
 
+        # 初始化智能限流探测器
+        rate_limit_detector = RateLimitDetector(enable=True)
+        logger.info("智能限流探测: 已启用")
+
         success_count = 0
         failed_count = 0
 
         # 使用tqdm显示进度
         with tqdm(total=len(failed_stocks), desc="重试进度", unit="只", ncols=100) as pbar:
             for ts_code in failed_stocks:
-                # 检查是否需要暂停
+                # 检查失败监控器是否需要暂停
                 failure_monitor.wait_if_paused()
+
+                # 检查智能限流探测器是否需要暂停
+                should_wait, wait_seconds = await rate_limit_detector.should_pause()
+                if should_wait:
+                    if rate_limit_detector.detection_phase == "detecting":
+                        pbar.set_postfix_str(f"探测中 ({rate_limit_detector.probe_count}/15)")
+                    await asyncio.sleep(wait_seconds)
 
                 try:
                     pbar.set_postfix_str(f"当前: {ts_code}")
@@ -251,6 +298,14 @@ async def retry_failed_stocks():
                         start_date=start_date,
                         end_date=end_date
                     )
+
+                    # 记录成功请求
+                    rate_limit_detector.record_success()
+
+                    # 如果在探测阶段试探成功，确认窗口
+                    if rate_limit_detector.detection_phase == "detecting":
+                        rate_limit_detector.confirm_window_detected()
+                        logger.info("继续重试...")
 
                     if not data:
                         logger.debug(f"{ts_code} 无数据")
@@ -276,10 +331,18 @@ async def retry_failed_stocks():
 
                 except Exception as e:
                     error_msg = str(e)
-                    logger.error(f"✗ {ts_code} 重试失败: {error_msg}")
-                    tracker.mark_failed(ts_code, error_msg)
-                    failure_monitor.on_failure(error_msg)
-                    failed_count += 1
+
+                    # 判断是否为限流错误
+                    if is_rate_limit_error(e):
+                        logger.warning(f"🚨 {ts_code} 触发限流: {error_msg}")
+                        await rate_limit_detector.on_rate_limit_error()
+                        tracker.mark_failed(ts_code, f"限流: {error_msg}")
+                        failed_count += 1
+                    else:
+                        logger.error(f"✗ {ts_code} 重试失败: {error_msg}")
+                        tracker.mark_failed(ts_code, error_msg)
+                        failure_monitor.on_failure(error_msg)
+                        failed_count += 1
 
                 finally:
                     pbar.update(1)
@@ -293,6 +356,9 @@ async def retry_failed_stocks():
         monitor_stats = failure_monitor.get_stats()
         if monitor_stats["pause_count"] > 0:
             logger.info(f"监控统计: 暂停{monitor_stats['pause_count']}次, 总失败{monitor_stats['total_failures']}次")
+
+        # 打印限流探测统计
+        rate_limit_detector.print_summary()
 
         report = {
             "total_retried": len(failed_stocks),
