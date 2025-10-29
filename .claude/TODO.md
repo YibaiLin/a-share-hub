@@ -558,6 +558,28 @@ Phase 9: ⏸️ 待开始
     - 测试失败监控器（12个测试）
   - ⏸️ 手动验证（建议在实际回填时验证）
 
+- [x] 9.8 重构限流探测机制（简化版） ✅
+  - ✅ 重构utils/rate_limit_detector.py（简化逻辑）
+    - 固定5分钟探测间隔（替代多候选窗口）
+    - 状态机：NORMAL → PAUSED → PROBING → CONFIRMED
+    - 多数据源支持：边界key格式 {source}.{interface}.{data_type}
+    - 边界持久化：.rate_limit_boundaries.json
+    - 启动时自动加载已有边界
+  - ✅ 移除collectors/base.py的tenacity重试机制
+    - 删除@retry装饰器和tenacity导入
+    - 由调用方统一处理重试逻辑
+  - ✅ 调整scripts/backfill.py集成逻辑
+    - 初始化时指定数据源信息
+    - 更新错误处理逻辑
+    - 新增--show-boundaries命令
+  - ✅ 更新.gitignore（添加边界文件）
+  - ✅ 重写测试用例（26个测试全部通过）
+    - 8个错误识别测试
+    - 17个探测器功能测试
+    - 1个集成测试
+  - ✅ 记录技术决策（ADR-006）
+  - ⏸️ 实际运行验证新机制
+
 ### 验收标准
 - ✅ 可以成功获取全A股股票列表（约5000只）
 - ✅ 支持全市场数据回填（--all参数）
