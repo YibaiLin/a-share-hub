@@ -3,16 +3,16 @@
 
 提供所有采集器的通用功能：
 - 限流机制（防止API频繁请求）
-- 重试机制（网络异常自动重试）
 - 日志记录
 - 抽象方法定义
+
+注意：重试机制已移除，由调用方（如backfill.py）结合智能限流探测器统一处理
 """
 
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 import asyncio
-from tenacity import retry, stop_after_attempt, wait_exponential
 from core.logger import logger
 from config.settings import settings
 
@@ -187,11 +187,6 @@ class BaseCollector(ABC):
         """
         pass
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        reraise=True,
-    )
     async def collect(self, **kwargs) -> list[dict]:
         """
         执行完整的数据采集流程

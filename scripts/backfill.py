@@ -92,8 +92,14 @@ async def backfill_all_stocks(
         )
         logger.info(f"失败监控: 阈值={failure_monitor.threshold}, 暂停时长={failure_monitor.pause_duration}秒")
 
-        # 初始化智能限流探测器
-        rate_limit_detector = RateLimitDetector(enable=True)
+        # 初始化智能限流探测器（指定数据源和接口）
+        rate_limit_detector = RateLimitDetector(
+            enable=True,
+            source="akshare",
+            interface="stock_zh_a_hist",
+            data_type="daily",
+            description="A股日线数据"
+        )
         logger.info("智能限流探测: 已启用")
 
         # 创建信号量控制并发
@@ -118,9 +124,11 @@ async def backfill_all_stocks(
                     # 检查智能限流探测器是否需要暂停
                     should_wait, wait_seconds = await rate_limit_detector.should_pause()
                     if should_wait:
-                        # 如果是探测阶段，试探性请求
-                        if rate_limit_detector.detection_phase == "detecting":
-                            pbar.set_postfix_str(f"探测中 ({rate_limit_detector.probe_count}/15)")
+                        # 更新进度条显示等待状态
+                        if rate_limit_detector.state == "PROBING":
+                            pbar.set_postfix_str(f"探测等待 (第{rate_limit_detector.probe_count + 1}次)")
+                        elif rate_limit_detector.state == "CONFIRMED":
+                            pbar.set_postfix_str(f"智能暂停 ({wait_seconds}秒)")
                         await asyncio.sleep(wait_seconds)
 
                     try:
@@ -138,8 +146,8 @@ async def backfill_all_stocks(
                         rate_limit_detector.record_success()
 
                         # 如果在探测阶段试探成功，确认窗口
-                        if rate_limit_detector.detection_phase == "detecting":
-                            rate_limit_detector.confirm_window_detected()
+                        if rate_limit_detector.state == "PROBING":
+                            await rate_limit_detector.on_probe_success()
                             logger.info("继续采集...")
 
                         if not data:
@@ -171,8 +179,15 @@ async def backfill_all_stocks(
                         # 判断是否为限流错误
                         if is_rate_limit_error(e):
                             logger.warning(f"🚨 {ts_code} 触发限流: {error_msg}")
-                            # 通知限流探测器
-                            await rate_limit_detector.on_rate_limit_error()
+
+                            # 根据当前状态通知限流探测器
+                            if rate_limit_detector.state == "NORMAL":
+                                await rate_limit_detector.on_rate_limit_triggered()
+                            elif rate_limit_detector.state == "PROBING":
+                                await rate_limit_detector.on_probe_failed()
+                            elif rate_limit_detector.state == "CONFIRMED":
+                                await rate_limit_detector.on_rate_limit_re_triggered()
+
                             # 标记失败（后续可重试）
                             tracker.mark_failed(ts_code, f"限流: {error_msg}")
                             failed_count += 1
@@ -269,8 +284,14 @@ async def retry_failed_stocks():
             enable=True
         )
 
-        # 初始化智能限流探测器
-        rate_limit_detector = RateLimitDetector(enable=True)
+        # 初始化智能限流探测器（指定数据源和接口）
+        rate_limit_detector = RateLimitDetector(
+            enable=True,
+            source="akshare",
+            interface="stock_zh_a_hist",
+            data_type="daily",
+            description="A股日线数据"
+        )
         logger.info("智能限流探测: 已启用")
 
         success_count = 0
@@ -285,8 +306,10 @@ async def retry_failed_stocks():
                 # 检查智能限流探测器是否需要暂停
                 should_wait, wait_seconds = await rate_limit_detector.should_pause()
                 if should_wait:
-                    if rate_limit_detector.detection_phase == "detecting":
-                        pbar.set_postfix_str(f"探测中 ({rate_limit_detector.probe_count}/15)")
+                    if rate_limit_detector.state == "PROBING":
+                        pbar.set_postfix_str(f"探测等待 (第{rate_limit_detector.probe_count + 1}次)")
+                    elif rate_limit_detector.state == "CONFIRMED":
+                        pbar.set_postfix_str(f"智能暂停 ({wait_seconds}秒)")
                     await asyncio.sleep(wait_seconds)
 
                 try:
@@ -303,8 +326,8 @@ async def retry_failed_stocks():
                     rate_limit_detector.record_success()
 
                     # 如果在探测阶段试探成功，确认窗口
-                    if rate_limit_detector.detection_phase == "detecting":
-                        rate_limit_detector.confirm_window_detected()
+                    if rate_limit_detector.state == "PROBING":
+                        await rate_limit_detector.on_probe_success()
                         logger.info("继续重试...")
 
                     if not data:
@@ -335,7 +358,14 @@ async def retry_failed_stocks():
                     # 判断是否为限流错误
                     if is_rate_limit_error(e):
                         logger.warning(f"🚨 {ts_code} 触发限流: {error_msg}")
-                        await rate_limit_detector.on_rate_limit_error()
+
+                        # 根据当前状态通知限流探测器
+                        if rate_limit_detector.state == "NORMAL":
+                            await rate_limit_detector.on_rate_limit_triggered()
+                        elif rate_limit_detector.state == "PROBING":
+                            await rate_limit_detector.on_probe_failed()
+                        elif rate_limit_detector.state == "CONFIRMED":
+                            await rate_limit_detector.on_rate_limit_re_triggered()
                         tracker.mark_failed(ts_code, f"限流: {error_msg}")
                         failed_count += 1
                     else:
@@ -603,10 +633,21 @@ def main():
         action="store_true",
         help="清除进度重新开始"
     )
+    parser.add_argument(
+        "--show-boundaries",
+        action="store_true",
+        help="显示限流边界信息"
+    )
 
     args = parser.parse_args()
 
     # 验证参数
+    if args.show_boundaries:
+        # 显示限流边界信息
+        from utils.rate_limit_detector import print_all_boundaries
+        print_all_boundaries()
+        return
+
     if args.clean:
         tracker = ProgressTracker()
         tracker.clear_progress()

@@ -1,11 +1,13 @@
 """
-智能限流探测器测试
+智能限流探测器测试（简化版）
 """
 
 import pytest
 import time
 import asyncio
-from utils.rate_limit_detector import RateLimitDetector, is_rate_limit_error
+import os
+import json
+from utils.rate_limit_detector import RateLimitDetector, RateLimitBoundary, is_rate_limit_error, print_all_boundaries
 
 
 class TestIsRateLimitError:
@@ -55,188 +57,300 @@ class TestIsRateLimitError:
 class TestRateLimitDetector:
     """测试限流探测器"""
 
-    def test_init(self):
-        """测试初始化"""
-        detector = RateLimitDetector(enable=True)
+    @pytest.fixture
+    def test_boundary_file(self, tmp_path):
+        """创建临时边界文件路径"""
+        return str(tmp_path / "test_boundaries.json")
 
+    @pytest.fixture
+    def detector(self, test_boundary_file):
+        """创建测试用探测器"""
+        return RateLimitDetector(
+            enable=True,
+            source="test",
+            interface="test_api",
+            data_type="test",
+            description="测试接口",
+            boundary_file=test_boundary_file
+        )
+
+    def test_init(self, detector):
+        """测试初始化"""
         assert detector.enable is True
-        assert detector.detection_phase == "normal"
-        assert detector.detected_window is None
-        assert detector.detected_limit is None
+        assert detector.source == "test"
+        assert detector.interface == "test_api"
+        assert detector.data_type == "test"
+        assert detector.boundary_key == "test.test_api.test"
+        assert detector.state == "NORMAL"
+        assert detector.boundary is None
         assert len(detector.request_history) == 0
 
-    def test_init_disabled(self):
+    def test_init_disabled(self, test_boundary_file):
         """测试禁用状态"""
-        detector = RateLimitDetector(enable=False)
+        detector = RateLimitDetector(
+            enable=False,
+            boundary_file=test_boundary_file
+        )
         assert detector.enable is False
 
-    def test_record_success(self):
+    def test_record_success(self, detector):
         """测试记录成功请求"""
-        detector = RateLimitDetector()
-
         detector.record_success()
         assert len(detector.request_history) == 1
-        assert detector.total_requests == 1
+        assert detector.success_count == 1
 
         detector.record_success()
         assert len(detector.request_history) == 2
-        assert detector.total_requests == 2
+        assert detector.success_count == 2
 
-    def test_record_success_disabled(self):
+    def test_record_success_disabled(self, test_boundary_file):
         """测试禁用时不记录"""
-        detector = RateLimitDetector(enable=False)
-
+        detector = RateLimitDetector(enable=False, boundary_file=test_boundary_file)
         detector.record_success()
         assert len(detector.request_history) == 0
-        assert detector.total_requests == 0
-
-    def test_record_success_cleanup(self):
-        """测试清理旧记录（超过15分钟）"""
-        detector = RateLimitDetector()
-
-        # 模拟添加16分钟前的请求
-        old_time = time.time() - 960  # 16分钟前
-        detector.request_history.append(old_time)
-
-        # 添加新请求
-        detector.record_success()
-
-        # 旧记录应该被清理
-        assert len(detector.request_history) == 1
-        assert detector.request_history[0] > old_time
+        assert detector.success_count == 0
 
     @pytest.mark.asyncio
-    async def test_on_rate_limit_error(self):
-        """测试触发限流错误"""
-        detector = RateLimitDetector()
-
+    async def test_on_rate_limit_triggered(self, detector):
+        """测试触发限流"""
         # 先记录一些成功请求
-        for _ in range(10):
+        for _ in range(50):
             detector.record_success()
 
         # 触发限流
-        await detector.on_rate_limit_error()
+        await detector.on_rate_limit_triggered()
 
-        assert detector.detection_phase == "detecting"
-        assert detector.first_failure_time is not None
+        assert detector.state == "PAUSED"
+        assert detector.trigger_count == 50
+        assert detector.trigger_time is not None
+        assert detector.next_probe_time is not None
         assert detector.total_rate_limit_errors == 1
 
     @pytest.mark.asyncio
-    async def test_should_pause_normal_phase(self):
-        """测试正常阶段不暂停"""
-        detector = RateLimitDetector()
-
+    async def test_should_pause_normal_state(self, detector):
+        """测试正常状态不暂停"""
         should_wait, wait_seconds = await detector.should_pause()
-
         assert should_wait is False
         assert wait_seconds == 0
 
     @pytest.mark.asyncio
-    async def test_should_pause_detecting_phase(self):
-        """测试探测阶段需要暂停"""
-        detector = RateLimitDetector()
+    async def test_should_pause_paused_state(self, detector):
+        """测试暂停状态需要等待"""
+        # 模拟触发限流
+        detector.state = "PAUSED"
+        detector.trigger_time = time.time()
+        detector.next_probe_time = time.time() + 10  # 10秒后试探
 
-        # 记录一些请求
-        for _ in range(50):
-            detector.record_success()
-            time.sleep(0.01)  # 模拟时间间隔
-
-        # 触发限流，进入探测阶段
-        await detector.on_rate_limit_error()
-
-        # 立即检查，应该需要等待约60秒
         should_wait, wait_seconds = await detector.should_pause()
-
         assert should_wait is True
-        assert 55 <= wait_seconds <= 65  # 允许一些误差
+        assert 5 <= wait_seconds <= 15  # 允许一些误差
 
     @pytest.mark.asyncio
-    async def test_should_pause_disabled(self):
-        """测试禁用时不暂停"""
-        detector = RateLimitDetector(enable=False)
+    async def test_should_pause_probe_ready(self, detector):
+        """测试探测时间到了"""
+        # 模拟触发限流，且探测时间已到
+        detector.state = "PAUSED"
+        detector.trigger_time = time.time() - 301  # 5分钟前触发
+        detector.next_probe_time = time.time() - 1  # 探测时间已过
 
-        await detector.on_rate_limit_error()
         should_wait, wait_seconds = await detector.should_pause()
+        assert should_wait is False
+        assert wait_seconds == 0
+        assert detector.state == "PROBING"
+        assert detector.probe_count == 1
 
+    @pytest.mark.asyncio
+    async def test_on_probe_success(self, detector):
+        """测试探测成功"""
+        # 模拟场景：50次请求后触发限流，5分钟后探测成功
+        detector.trigger_count = 50
+        detector.trigger_time = time.time() - 300  # 5分钟前
+        detector.probe_count = 1
+        detector.state = "PROBING"
+
+        await detector.on_probe_success()
+
+        assert detector.state == "CONFIRMED"
+        assert detector.boundary is not None
+        assert detector.boundary.max_requests == 50
+        assert 290 <= detector.boundary.window_seconds <= 310  # 允许误差
+        assert detector.safe_batch_size == 40  # 80% of 50
+        assert 350 <= detector.safe_pause_time <= 370  # 120% of 300
+
+    @pytest.mark.asyncio
+    async def test_on_probe_failed(self, detector):
+        """测试探测失败"""
+        detector.state = "PROBING"
+        detector.probe_count = 1
+
+        await detector.on_probe_failed()
+
+        # 下次探测时间应该在5分钟后
+        assert detector.next_probe_time is not None
+        assert detector.next_probe_time > time.time()
+
+    @pytest.mark.asyncio
+    async def test_on_rate_limit_re_triggered(self, detector):
+        """测试已确认后再次触发限流"""
+        # 模拟已确认状态
+        detector.state = "CONFIRMED"
+        detector.boundary = RateLimitBoundary(
+            max_requests=50,
+            wait_time_seconds=300,
+            window_seconds=300,
+            detected_at=time.time(),
+            confidence="high"
+        )
+        detector.success_count = 30
+
+        await detector.on_rate_limit_re_triggered()
+
+        # 应该重置到暂停状态
+        assert detector.state == "PAUSED"
+        assert detector.trigger_count == 30
+        assert detector.probe_count == 0
+        assert detector.total_rate_limit_errors == 1
+
+    @pytest.mark.asyncio
+    async def test_should_pause_confirmed_safe(self, detector):
+        """测试已确认状态，请求数安全时不暂停"""
+        # 模拟已确认窗口：300秒内最多50次
+        detector.state = "CONFIRMED"
+        detector.boundary = RateLimitBoundary(
+            max_requests=50,
+            wait_time_seconds=300,
+            window_seconds=300,
+            detected_at=time.time(),
+            confidence="high"
+        )
+        detector.safe_batch_size = 40
+
+        # 只记录30次请求（低于安全限制40次）
+        now = time.time()
+        for i in range(30):
+            detector.request_history.append(now - 100 + i * 3)
+
+        should_wait, wait_seconds = await detector.should_pause()
         assert should_wait is False
         assert wait_seconds == 0
 
-    def test_confirm_window_detected(self):
-        """测试确认窗口探测成功"""
-        detector = RateLimitDetector()
-
-        # 模拟场景：5分钟内请求了78次，然后失败
-        base_time = time.time() - 10  # 从10秒前开始
-        for i in range(78):
-            detector.request_history.append(base_time - 300 + i * 3.8)  # 分布在5分钟内
-
-        # 设置失败时间为base_time（78次请求后）
-        detector.first_failure_time = base_time
-        detector.detection_phase = "detecting"
-        detector.probe_count = 5
-
-        # 现在试探成功，确认窗口
-        detector.confirm_window_detected()
-
-        assert detector.detection_phase == "confirmed"
-        assert detector.detected_window is not None
-        assert detector.detected_limit is not None
-        assert detector.detected_limit > 0
-
-    def test_confirm_window_not_in_detecting_phase(self):
-        """测试非探测阶段不确认"""
-        detector = RateLimitDetector()
-
-        detector.confirm_window_detected()
-
-        # 状态不应该改变
-        assert detector.detection_phase == "normal"
-        assert detector.detected_window is None
-
     @pytest.mark.asyncio
-    async def test_should_pause_confirmed_phase_safe(self):
-        """测试已确认阶段，请求数安全时不暂停"""
-        detector = RateLimitDetector()
+    async def test_should_pause_confirmed_near_limit(self, detector):
+        """测试已确认状态，接近上限时需要暂停"""
+        # 模拟已确认窗口：300秒内最多50次
+        detector.state = "CONFIRMED"
+        detector.boundary = RateLimitBoundary(
+            max_requests=50,
+            wait_time_seconds=300,
+            window_seconds=300,
+            detected_at=time.time(),
+            confidence="high"
+        )
+        detector.safe_batch_size = 40
+        detector.safe_pause_time = 360
 
-        # 模拟已确认窗口：300秒内最多100次
-        detector.detection_phase = "confirmed"
-        detector.detected_window = 300
-        detector.detected_limit = 100
-
-        # 只记录50次请求（低于安全限制90次）
+        # 记录40次请求（达到安全限制）
         now = time.time()
-        for i in range(50):
-            detector.request_history.append(now - 100 + i * 2)
+        for i in range(40):
+            detector.request_history.append(now - 290 + i * 7)
 
         should_wait, wait_seconds = await detector.should_pause()
-
-        assert should_wait is False
-        assert wait_seconds == 0
-
-    @pytest.mark.asyncio
-    async def test_should_pause_confirmed_phase_near_limit(self):
-        """测试已确认阶段，接近上限时需要暂停"""
-        detector = RateLimitDetector()
-
-        # 模拟已确认窗口：300秒内最多100次
-        detector.detection_phase = "confirmed"
-        detector.detected_window = 300
-        detector.detected_limit = 100
-
-        # 记录95次请求（超过安全限制90次）
-        now = time.time()
-        for i in range(95):
-            detector.request_history.append(now - 290 + i * 3)
-
-        should_wait, wait_seconds = await detector.should_pause()
-
         assert should_wait is True
-        assert wait_seconds > 0
+        assert wait_seconds == 360
 
-    def test_get_stats(self):
+    def test_save_and_load_boundary(self, test_boundary_file):
+        """测试边界保存和加载"""
+        # 创建探测器并保存边界
+        detector1 = RateLimitDetector(
+            enable=True,
+            source="test",
+            interface="test_api",
+            data_type="test",
+            boundary_file=test_boundary_file
+        )
+
+        detector1.trigger_count = 50
+        detector1.trigger_time = time.time() - 300
+        detector1.probe_count = 1
+        detector1.state = "PROBING"
+        detector1.total_probes = 1
+
+        # 模拟探测成功并保存
+        asyncio.run(detector1.on_probe_success())
+
+        # 创建新探测器，应该能加载边界
+        detector2 = RateLimitDetector(
+            enable=True,
+            source="test",
+            interface="test_api",
+            data_type="test",
+            boundary_file=test_boundary_file
+        )
+
+        assert detector2.state == "CONFIRMED"
+        assert detector2.boundary is not None
+        assert detector2.boundary.max_requests == 50
+        assert detector2.safe_batch_size == 40
+
+    def test_multiple_sources(self, test_boundary_file):
+        """测试多数据源支持"""
+        # 创建第一个数据源的探测器
+        detector1 = RateLimitDetector(
+            enable=True,
+            source="source1",
+            interface="api1",
+            data_type="daily",
+            boundary_file=test_boundary_file
+        )
+        detector1.trigger_count = 50
+        detector1.trigger_time = time.time() - 300
+        detector1.probe_count = 1
+        detector1.state = "PROBING"
+        asyncio.run(detector1.on_probe_success())
+
+        # 创建第二个数据源的探测器
+        detector2 = RateLimitDetector(
+            enable=True,
+            source="source2",
+            interface="api2",
+            data_type="minute",
+            boundary_file=test_boundary_file
+        )
+        detector2.trigger_count = 100
+        detector2.trigger_time = time.time() - 600
+        detector2.probe_count = 2
+        detector2.state = "PROBING"
+        asyncio.run(detector2.on_probe_success())
+
+        # 验证文件包含两个数据源
+        with open(test_boundary_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        assert len(data['boundaries']) == 2
+        assert 'source1.api1.daily' in data['boundaries']
+        assert 'source2.api2.minute' in data['boundaries']
+
+        # 创建新探测器验证能分别加载
+        detector3 = RateLimitDetector(
+            enable=True,
+            source="source1",
+            interface="api1",
+            data_type="daily",
+            boundary_file=test_boundary_file
+        )
+        assert detector3.boundary.max_requests == 50
+
+        detector4 = RateLimitDetector(
+            enable=True,
+            source="source2",
+            interface="api2",
+            data_type="minute",
+            boundary_file=test_boundary_file
+        )
+        assert detector4.boundary.max_requests == 100
+
+    def test_get_stats(self, detector):
         """测试获取统计信息"""
-        detector = RateLimitDetector()
-
         # 记录一些数据
         for _ in range(10):
             detector.record_success()
@@ -244,120 +358,79 @@ class TestRateLimitDetector:
         stats = detector.get_stats()
 
         assert stats["enabled"] is True
-        assert stats["phase"] == "normal"
-        assert stats["total_requests"] == 10
-        assert stats["requests_in_history"] == 10
+        assert stats["boundary_key"] == "test.test_api.test"
+        assert stats["state"] == "NORMAL"
+        assert stats["total_success"] == 10
+        assert stats["boundary"] is None
 
-    def test_get_stats_after_detection(self):
-        """测试探测后的统计信息"""
-        detector = RateLimitDetector()
+    def test_confidence_calculation(self, detector):
+        """测试置信度计算"""
+        # probe_count=1 -> high
+        detector.probe_count = 1
+        assert detector._calculate_confidence() == "high"
 
-        # 模拟探测完成
-        detector.detection_phase = "confirmed"
-        detector.detected_window = 300
-        detector.detected_limit = 80
-        detector.total_requests = 100
-        detector.total_rate_limit_errors = 1
-        detector.total_probes = 5
-        detector.total_wait_time = 300.0
+        # probe_count=2 -> medium
+        detector.probe_count = 2
+        assert detector._calculate_confidence() == "medium"
 
-        stats = detector.get_stats()
-
-        assert stats["phase"] == "confirmed"
-        assert stats["detected_window"] == 300
-        assert stats["detected_limit"] == 80
-        assert stats["total_requests"] == 100
-        assert stats["total_rate_limit_errors"] == 1
-        assert stats["total_probes"] == 5
-        assert stats["total_wait_time"] == 300.0
-
-    def test_print_summary(self):
-        """测试打印总结（不抛异常即可）"""
-        detector = RateLimitDetector()
-
-        detector.total_requests = 100
-        detector.detected_window = 300
-        detector.detected_limit = 80
-
-        # 应该能正常打印，不抛异常
-        detector.print_summary()
-
-    @pytest.mark.asyncio
-    async def test_detection_timeout(self):
-        """测试探测超时（15分钟）"""
-        detector = RateLimitDetector()
-
-        # 模拟15分钟前开始探测
-        detector.detection_phase = "detecting"
-        detector.detection_start_time = time.time() - 910  # 15分10秒前
-
-        should_wait, wait_seconds = await detector.should_pause()
-
-        # 应该放弃探测，返回正常状态
-        assert detector.detection_phase == "normal"
-        assert should_wait is False
-
-    @pytest.mark.asyncio
-    async def test_multiple_rate_limit_errors(self):
-        """测试多次限流错误"""
-        detector = RateLimitDetector()
-
-        # 第一次限流
-        await detector.on_rate_limit_error()
-        assert detector.total_rate_limit_errors == 1
-        assert detector.detection_phase == "detecting"
-
-        # 探测过程中再次限流（应该被忽略）
-        await detector.on_rate_limit_error()
-        assert detector.total_rate_limit_errors == 2
-        assert detector.detection_phase == "detecting"  # 状态不变
-
-    @pytest.mark.asyncio
-    async def test_confirmed_then_rate_limit_again(self):
-        """测试确认后再次触发限流"""
-        detector = RateLimitDetector()
-
-        # 模拟已确认状态
-        detector.detection_phase = "confirmed"
-        detector.detected_window = 300
-        detector.detected_limit = 80
-
-        # 再次触发限流
-        await detector.on_rate_limit_error()
-
-        # 应该保持确认状态（不重新探测）
-        assert detector.detection_phase == "confirmed"
-        assert detector.total_rate_limit_errors == 1
+        # probe_count=4 -> low
+        detector.probe_count = 4
+        assert detector._calculate_confidence() == "low"
 
 
 @pytest.mark.asyncio
-async def test_integration_scenario():
+async def test_integration_scenario(tmp_path):
     """集成测试：完整的探测流程"""
-    detector = RateLimitDetector()
+    boundary_file = str(tmp_path / "integration_test.json")
+
+    detector = RateLimitDetector(
+        enable=True,
+        source="integration_test",
+        interface="test_api",
+        data_type="test",
+        boundary_file=boundary_file
+    )
 
     # 阶段1：正常采集
-    for i in range(80):
+    for i in range(50):
         detector.record_success()
-        time.sleep(0.001)  # 模拟时间
+
+    assert detector.state == "NORMAL"
+    assert detector.success_count == 50
 
     # 阶段2：触发限流
-    await detector.on_rate_limit_error()
-    assert detector.detection_phase == "detecting"
+    await detector.on_rate_limit_triggered()
+    assert detector.state == "PAUSED"
+    assert detector.trigger_count == 50
 
-    # 阶段3：第一次试探（应该需要等待）
+    # 阶段3：等待探测
     should_wait, wait_seconds = await detector.should_pause()
     assert should_wait is True
 
-    # 阶段4：模拟等待后试探成功
-    detector.confirm_window_detected()
-    assert detector.detection_phase == "confirmed"
-    assert detector.detected_window is not None
-    assert detector.detected_limit is not None
+    # 阶段4：模拟时间流逝，探测时间到
+    detector.next_probe_time = time.time() - 1
+    should_wait, wait_seconds = await detector.should_pause()
+    assert should_wait is False
+    assert detector.state == "PROBING"
 
-    # 阶段5：确认后的智能等待
-    stats = detector.get_stats()
-    assert stats["total_requests"] == 80
-    assert stats["total_rate_limit_errors"] == 1
+    # 阶段5：探测成功
+    await detector.on_probe_success()
+    assert detector.state == "CONFIRMED"
+    assert detector.boundary is not None
+
+    # 阶段6：验证边界已保存
+    assert os.path.exists(boundary_file)
+
+    # 阶段7：新实例能加载边界
+    detector2 = RateLimitDetector(
+        enable=True,
+        source="integration_test",
+        interface="test_api",
+        data_type="test",
+        boundary_file=boundary_file
+    )
+    assert detector2.state == "CONFIRMED"
+    assert detector2.boundary is not None
 
 
 if __name__ == "__main__":

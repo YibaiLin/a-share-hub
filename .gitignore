@@ -21,6 +21,8 @@ logs/*.log
 !logs/.gitkeep
 *.db
 *.sqlite
+.rate_limit_boundaries.json
+.backfill_progress.json
 
 # IDE
 .vscode/
